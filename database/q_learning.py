@@ -90,7 +90,7 @@ class QValueTrainer:
         self.state_dim = config.model_config.get('embedding_dim', 768)
         self.action_dim = config.model_config.get('embedding_dim', 768)
         
-        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')  #adjust for M3 Chip for macbook
         
         self.q_network = QNetwork(self.state_dim, self.action_dim).to(self.device)
         self.target_network = QNetwork(self.state_dim, self.action_dim).to(self.device)

@@ -67,7 +67,6 @@ class Neo4jConnection:
 
 class KnowledgeGraph:
     """Manages knowledge graph operations."""
-    
     def __init__(self, config: Config):
         self.config = config
         self.logger = logging.getLogger(self.__class__.__name__)
@@ -1052,21 +1051,6 @@ class KnowledgeGraph:
                 'error': str(e),
                 'timestamp': datetime.now().isoformat()
             }
-
-# Add to __init__
-def __init__(self, config: Config):
-    self.config = config
-    self.logger = logging.getLogger(self.__class__.__name__)
-    self.connection = Neo4jConnection(config)
-    self.optimizer = PerformanceOptimizer(config, self.connection)
-    self.monitoring = MonitoringService(config, self.connection)
-    
-    # Initialize components
-    self.validator = GraphValidator(config, self.connection)
-    self.retriever = GraphRetriever(config, self.connection)
-    self.query_cache = QueryCache()
-    self.community_detector = CommunityDetector(config, self.connection)
-    self.embedding_cache = cache_manager  # Use global cache manager for embeddings
 
     # Helper methods
     def _check_graph_connectivity(self, session: Session) -> Dict[str, Any]:

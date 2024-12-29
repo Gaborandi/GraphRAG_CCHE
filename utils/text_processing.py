@@ -25,3 +25,5 @@ class TextPreprocessor:
             'sentence_count': len(re.split(r'[.!?]+', text)),
         }
         return metadata
+
+
