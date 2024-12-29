@@ -1,10 +1,18 @@
 # database/graph.py
-from neo4j import GraphDatabase, Session
-from typing import Dict, List, Any, Optional, Tuple
+from neo4j import Transaction, GraphDatabase
+from neo4j.exceptions import Neo4jTransientError, Neo4jError, TransientError
+from typing import List, Dict, Any, Optional, Tuple
+from dataclasses import dataclass
+from datetime import datetime, timedelta
+import threading
 import logging
-from datetime import datetime
+from contextlib import contextmanager
 import json
 import uuid
+import time  # Missing but used in multiple methods
+import re    # Missing but used in _validate_doc_id
+from neo4j import Session  # Missing but used in method signatures
+import hashlib
 
 from ..config import Config
 from ..llm.model import ExtractionResult
@@ -22,6 +30,35 @@ from ..services.cache import cache_manager, cache_result
 from ..services.optimizer import PerformanceOptimizer, QueryOptimizationContext
 from ..services.monitoring import MonitoringService
 
+# Add missing class definitions
+class GraphProcessingError(GraphError):
+    """Error raised during graph processing operations."""
+    pass
+
+class ExponentialBackoff:
+    def __init__(self, initial_delay: float, max_delay: float, factor: float):
+        self.initial_delay = initial_delay
+        self.max_delay = max_delay
+        self.factor = factor
+
+    def get_delay(self, attempt: int) -> float:
+        delay = self.initial_delay * (self.factor ** attempt)
+        return min(delay, self.max_delay)
+
+class QueryCache:
+    def __init__(self):
+        self._cache = {}
+        self._stats = {'hits': 0, 'misses': 0}
+
+    def clear(self):
+        self._cache.clear()
+        
+    def get_stats(self) -> Dict[str, int]:
+        return self._stats.copy()
+
+    def cache_query_result(self, query: str, results: Any):
+        self._cache[query] = results
+            
 class Neo4jConnection:
     """Manages Neo4j database connection and operations."""
     
@@ -65,6 +102,33 @@ class Neo4jConnection:
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.close()
 
+@dataclass
+class RetryPolicy:
+    max_retries: int
+    base_delay: float = 1.0
+    max_delay: float = 60.0
+    
+    def should_retry(self, attempt: int, exception: Exception) -> bool:
+        if attempt >= self.max_retries:
+            return False
+        return self._is_retryable(exception)
+    
+    def _is_retryable(self, exception: Exception) -> bool:
+        return isinstance(exception, (
+            Neo4jTransientError,
+            TransientError,
+            ConnectionError,
+            TimeoutError
+        ))
+    
+    def get_delay(self, attempt: int) -> float:
+        """Calculate exponential backoff delay."""
+        delay = min(
+            self.base_delay * (2 ** attempt),
+            self.max_delay
+        )
+        return delay
+        
 class KnowledgeGraph:
     """Manages knowledge graph operations."""
     def __init__(self, config: Config):
@@ -81,166 +145,259 @@ class KnowledgeGraph:
         self.community_detector = CommunityDetector(config, self.connection)
         self.embedding_cache = cache_manager  # Use global cache manager for embeddings
 
+        self._transaction_locks = {}  # Dict to store locks per document
+        self._global_lock = threading.Lock()
+        
+        self._batch_size = 1000
+        self._retry_policy = RetryPolicy(max_retries=3)
+
+    @contextmanager
+    def _get_doc_lock(self, doc_id: str):
+        """Get or create document-specific lock."""
+        with self._global_lock:
+            if doc_id not in self._transaction_locks:
+                self._transaction_locks[doc_id] = threading.Lock()
+            lock = self._transaction_locks[doc_id]
+        
+        try:
+            with lock:
+                yield
+        finally:
+            # Cleanup unused locks
+            with self._global_lock:
+                if not lock.locked():
+                    self._transaction_locks.pop(doc_id, None)
+
+    def _batch_process_entities(self, tx, entities: List[Dict]) -> List[Dict]:
+        """Process entities in optimized batches."""
+        query = """
+        UNWIND $entities as entity
+        MERGE (e:Entity {id: entity.id})
+        ON CREATE SET 
+            e += entity.properties,
+            e.created_at = datetime(),
+            e.last_updated = datetime()
+        ON MATCH SET 
+            e += entity.properties,
+            e.last_updated = datetime(),
+            e.update_count = COALESCE(e.update_count, 0) + 1
+        WITH e
+        RETURN e, e.id as id
+        """
+        if not all(isinstance(e, dict) and 'id' in e for e in entities):
+            raise ValueError("Invalid entity format")
+        
+        # Add batch size validation
+        if len(entities) > self._batch_size:
+            raise ValueError(f"Batch size {len(entities)} exceeds maximum {self._batch_size}")
+        
+        try:
+            result = tx.run(query, entities=entities)
+            processed = [record['e'] for record in result]
+            return processed
+        except Exception as e:
+            self.logger.error(f"Batch processing failed: {str(e)}")
+            raise GraphProcessingError("Entity batch processing failed") from e
+    
+
     @handle_errors(logger=logging.getLogger(__name__))    
     def process_extraction_results(self, doc_id: str, results: List[ExtractionResult]):
-        """
-        Process and store extraction results with monitoring.
+        attempt = 0
+        backoff = ExponentialBackoff(
+            initial_delay=1.0,
+            max_delay=60.0,
+            factor=2.0
+        )
+        
+        while True:
+            try:
+                with self._get_doc_lock(doc_id):
+                    # Process batch with transaction
+                    return self._process_with_transaction(doc_id, results)
+                    
+            except TransientError as e:
+                attempt += 1
+                if attempt >= self._retry_policy.max_retries:
+                    raise GraphProcessingError("Max retries exceeded") from e
+                    
+                delay = backoff.get_delay(attempt)
+                self.logger.warning(
+                    f"Retrying transaction (attempt {attempt}) after {delay}s: {str(e)}"
+                )
+                time.sleep(delay)
+                continue
+                
+            except Exception as e:
+                self.logger.error(f"Fatal error in transaction: {str(e)}")
+                raise GraphProcessingError("Transaction failed") from e
+
+    def _process_with_transaction(self, doc_id: str, results: List[ExtractionResult]) -> Dict[str, Any]:
+        """Process with transaction timeout.
+        
         Args:
             doc_id: Document identifier
             results: List of extraction results
+            
+        Returns:
+            Dict containing processed entities and relationships
+            
         Raises:
-            ValidationError: If validation fails
-            DatabaseError: If database operations fail
-            GraphError: For other graph-related errors
+            GraphProcessingError: If processing fails
         """
-        start_time = time.time()
-        operation_metrics = {
-            'entity_count': 0,
-            'relationship_count': 0,
-            'validation_errors': 0
-        }
+        timeout = self.config.get('transaction_timeout', 30)  # 30 second default
         
+        with self.connection._driver.session() as session:
+            try:
+                with session.begin_transaction(timeout=timeout) as tx:
+                    # Process batches
+                    processed = self._process_batches(tx, doc_id, results)
+                    tx.commit()
+                    return processed
+            except Exception as e:
+                self.logger.error(f"Transaction failed: {str(e)}")
+                if 'tx' in locals():
+                    tx.rollback()
+                raise GraphProcessingError(f"Transaction failed: {str(e)}") from e
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        """Ensure proper cleanup of resources."""
         try:
-            # Validate document ID
-            if not self._validate_doc_id(doc_id):
-                raise ValidationError(
-                    f"Invalid document ID: {doc_id}",
-                    ErrorCode.INVALID_INPUT,
-                    {'doc_id': doc_id}
-                )
+            # Clean up caches
+            self.query_cache.clear()
+            self.embedding_cache.clear()
             
-            # Process each extraction result
-            for result in results:
-                try:
-                    # Validate entities
-                    valid_entities = []
-                    for entity in result.entities:
-                        validation_result = self.validator.validate_entity(entity)
-                        if validation_result.success:
-                            valid_entities.append(entity)
-                        else:
-                            operation_metrics['validation_errors'] += 1
-                            self.logger.warning(
-                                f"Entity validation failed: {validation_result.message}",
-                                extra={'entity': entity}
-                            )
-                    
-                    # Validate relationships
-                    valid_relationships = []
-                    for relationship in result.relationships:
-                        validation_result = self.validator.validate_relationship(relationship)
-                        if validation_result.success:
-                            valid_relationships.append(relationship)
-                        else:
-                            operation_metrics['validation_errors'] += 1
-                            self.logger.warning(
-                                f"Relationship validation failed: {validation_result.message}",
-                                extra={'relationship': relationship}
-                            )
-                    
-                    # Create transaction for batch processing
-                    with self.connection._driver.session() as session:
-                        # Create document node if it doesn't exist
-                        self._create_document_node(session, doc_id)
-                        
-                        # Process valid entities
-                        entity_ids = self._create_entities(session, valid_entities)
-                        operation_metrics['entity_count'] += len(entity_ids)
-                        
-                        # Link entities to document
-                        self._link_entities_to_document(
-                            session,
-                            doc_id,
-                            entity_ids,
-                            result.chunk_id
-                        )
-                        
-                        # Process valid relationships
-                        self._create_relationships(
-                            session,
-                            valid_relationships,
-                            result.confidence
-                        )
-                        operation_metrics['relationship_count'] += len(valid_relationships)
-                    
-                    # Update graph statistics
-                    self._update_graph_stats(
-                        len(valid_entities),
-                        len(valid_relationships)
-                    )
-                    
-                except Exception as e:
-                    # Log but continue processing other results
-                    self.logger.error(
-                        f"Error processing extraction result: {str(e)}",
-                        extra={'chunk_id': result.chunk_id},
-                        exc_info=True
-                    )
-                    
-            # Record successful operation
-            duration = time.time() - start_time
-            self.monitoring.operation_monitor.record_operation(
-                operation_type='process_extraction',
-                duration=duration,
-                success=True
-            )
-            
-            # Record performance metrics
-            self.monitoring.performance_monitor.record_request(
-                duration=duration,
-                success=True,
-                endpoint='process_extraction'
-            )
-            
-            # Return operation metrics
-            return {
-                'success': True,
-                'duration': duration,
-                'metrics': operation_metrics
-            }
-            
+            # Close connections
+            if hasattr(self, 'connection'):
+                self.connection.close()
         except Exception as e:
-            # Record operation failure
-            duration = time.time() - start_time
-            self.monitoring.operation_monitor.record_operation(
-                operation_type='process_extraction',
-                duration=duration,
-                success=False
-            )
-            
-            # Record performance failure
-            self.monitoring.performance_monitor.record_request(
-                duration=duration,
-                success=False,
-                endpoint='process_extraction'
-            )
-            
-            # Track error
-            error_tracker.track_error(GraphError(
-                str(e),
-                'extraction_processing_error',
-                {
-                    'doc_id': doc_id,
-                    'duration': duration,
-                    'metrics': operation_metrics
-                }
-            ))
-            
-            # Re-raise with additional context
-            raise GraphError(
-                f"Failed to process extraction results: {str(e)}",
-                'extraction_processing_error',
-                {
-                    'doc_id': doc_id,
-                    'duration': duration,
-                    'metrics': operation_metrics
-                }
-            ) from e
+            self.logger.error(f"Cleanup failed: {str(e)}")
+            raise
 
     def update_communities(self):
         """Update graph communities."""
         detector = CommunityDetector(self.config, self.connection)
         detector.update_community_summaries(self.llm_processor)
+
+    def _validate_batch(self, batch: List[Dict[str, Any]], batch_type: str) -> List[Dict[str, Any]]:
+        """Validate a batch of entities or relationships.
+        
+        Args:
+            batch: List of items to validate
+            batch_type: Type of items ('entity' or 'relationship')
+            
+        Returns:
+            List of valid items
+            
+        Raises:
+            ValueError: If batch_type is invalid
+        """
+        if batch_type not in ['entity', 'relationship']:
+            raise ValueError(f"Invalid batch type: {batch_type}")
+            
+        valid_items = []
+        validation_func = (self.validator.validate_entity 
+                          if batch_type == 'entity' 
+                          else self.validator.validate_relationship)
+        
+        for item in batch:
+            try:
+                validation_result = validation_func(item)
+                if validation_result.success:
+                    valid_items.append(item)
+                else:
+                    self.logger.warning(
+                        f"{batch_type.capitalize()} validation failed: {validation_result.message}",
+                        extra={'item': item}
+                    )
+            except Exception as e:
+                self.logger.error(
+                    f"Error validating {batch_type}: {str(e)}",
+                    extra={'item': item}
+                )
+                
+        return valid_items
+
+    # Need to add this method
+    def _process_batches(self, tx: Transaction, doc_id: str, results: List[ExtractionResult]) -> Dict[str, Any]:
+        """Process results in batches.
+        
+        Args:
+            tx: Neo4j transaction
+            doc_id: Document identifier
+            results: List of extraction results
+            
+        Returns:
+            Dict containing processed entities and relationships
+            
+        Raises:
+            GraphProcessingError: If batch processing fails
+        """
+        try:
+            # Create document node
+            self._create_document_node(tx, doc_id)
+            
+            processed_entities = []
+            processed_relationships = []
+            metrics = {
+                'entity_count': 0,
+                'relationship_count': 0,
+                'batch_count': 0
+            }
+            
+            # Process in batches
+            for result in results:
+                # Validate entities
+                valid_entities = []
+                for entity in result.entities:
+                    validation_result = self.validator.validate_entity(entity)
+                    if validation_result.success:
+                        valid_entities.append(entity)
+                
+                # Process entities in batches
+                for i in range(0, len(valid_entities), self._batch_size):
+                    batch = valid_entities[i:i + self._batch_size]
+                    entity_batch = self._batch_process_entities(tx, batch)
+                    processed_entities.extend(entity_batch)
+                    
+                    # Link entities to document
+                    self._link_entities_to_document(
+                        tx, 
+                        doc_id,
+                        [e['id'] for e in entity_batch],
+                        result.chunk_id
+                    )
+                    
+                    metrics['entity_count'] += len(entity_batch)
+                    metrics['batch_count'] += 1
+                
+                # Process relationships
+                valid_relationships = []
+                for rel in result.relationships:
+                    validation_result = self.validator.validate_relationship(rel)
+                    if validation_result.success:
+                        valid_relationships.append(rel)
+                
+                # Create relationships
+                for relationship in valid_relationships:
+                    processed_rel = self._create_relationships(
+                        tx,
+                        [relationship],
+                        result.confidence
+                    )
+                    processed_relationships.extend(processed_rel)
+                    metrics['relationship_count'] += 1
+            
+            return {
+                'doc_id': doc_id,
+                'entities': processed_entities,
+                'relationships': processed_relationships,
+                'metrics': metrics,
+                'status': 'success'
+            }
+            
+        except Exception as e:
+            self.logger.error(f"Batch processing failed: {str(e)}")
+            raise GraphProcessingError(f"Failed to process batches: {str(e)}") from e
 
     def _create_document_node(self, session: Session, doc_id: str):
         """Create a document node in the graph."""
@@ -274,18 +431,6 @@ class KnowledgeGraph:
         
         # Process relationships
         self._create_relationships(session, result.relationships, result.confidence)
-
-    def query_graph(self, query: str, embedding_model) -> Dict[str, Any]:
-        """Query graph using graph-guided retrieval."""
-        retriever = GraphRetriever(self.config, self.connection)
-        results = retriever.retrieve(query, embedding_model)
-        
-        return {
-            'subgraphs': results.subgraphs,
-            'communities': [c.id for c in results.communities],
-            'confidence': results.confidence,
-            'retrieval_time': results.retrieval_time
-        }
 
     def staged_query_graph(self, query: str, embedding_model) -> Dict[str, Any]:
         """Query graph using staged retrieval process."""
@@ -723,108 +868,144 @@ class KnowledgeGraph:
     
     def query_graph(self, query: str, embedding_model) -> Dict[str, Any]:
         """
-        Query graph with performance monitoring.
+        Execute graph query with both retrieval and performance monitoring.
+        
         Args:
-            query: Query string
-            embedding_model: Model for embedding generation
+            query: Query string to execute
+            embedding_model: Model for generating embeddings
+            
         Returns:
-            Dict containing query results and metadata
+            Dict containing:
+            - results: Query results
+            - metadata: Performance and execution metadata
+            - retrieval_info: Information about retrieval process
+            
         Raises:
             GraphError: If query execution fails
         """
         start_time = time.time()
-        query_metrics = {
+        metrics = {
             'embedding_time': 0.0,
             'retrieval_time': 0.0,
-            'processing_time': 0.0
+            'processing_time': 0.0,
+            'total_time': 0.0
         }
-        
+    
         try:
-            # Generate query embedding
+            # 1. Generate query embedding
             embed_start = time.time()
             query_embedding = self.retriever._get_query_embedding(query, embedding_model)
-            query_metrics['embedding_time'] = time.time() - embed_start
-            
-            # Optimize query
-            optimized_query = self.optimizer.optimize_query(query, {
-                'embedding': query_embedding.tolist()
-            })
-            
-            # Perform retrieval
+            metrics['embedding_time'] = time.time() - embed_start
+    
+            # 2. Check cache
+            cache_key = self._generate_cache_key(query, query_embedding)
+            cached_result = self.query_cache.get(cache_key) if self.config.get('use_cache', True) else None
+            if cached_result:
+                return {
+                    'results': cached_result,
+                    'metadata': {'cache_hit': True},
+                    'metrics': metrics
+                }
+    
+            # 3. Query Optimization
+            optimization_start = time.time()
+            optimized_query = self.optimizer.optimize_query(
+                query, 
+                {'embedding': query_embedding.tolist()}
+            )
+    
+            # 4. Execute Retrieval
             retrieval_start = time.time()
             retrieval_results = self.retriever.retrieve(
                 query,
                 query_embedding,
                 max_results=self.config.model_config.get('max_results', 10)
             )
-            query_metrics['retrieval_time'] = time.time() - retrieval_start
-            
-            # Process results
+            metrics['retrieval_time'] = time.time() - retrieval_start
+    
+            # 5. Process Results
             processing_start = time.time()
             processed_results = self._process_query_results(
                 retrieval_results,
                 query_embedding
             )
-            query_metrics['processing_time'] = time.time() - processing_start
-            
-            # Calculate total duration
-            duration = time.time() - start_time
-            
-            # Record successful query
+            metrics['processing_time'] = time.time() - processing_start
+    
+            # 6. Calculate final metrics
+            metrics['total_time'] = time.time() - start_time
+    
+            # 7. Monitor Performance
             self.monitoring.performance_monitor.record_request(
-                duration=duration,
+                duration=metrics['total_time'],
                 success=True,
                 endpoint='query_graph',
-                metrics=query_metrics
+                metrics=metrics
             )
-            
-            # Update cache if enabled
+    
+            # 8. Cache results if enabled
             if self.config.model_config.get('cache_enabled', True):
                 self.query_cache.cache_query_result(
-                    query=query,
-                    results=processed_results
+                    cache_key,
+                    processed_results
                 )
-            
-            return {
+    
+            # 9. Prepare response
+            response = {
                 'results': processed_results,
                 'metadata': {
-                    'duration': duration,
-                    'metrics': query_metrics,
+                    'duration': metrics['total_time'],
+                    'metrics': metrics,
                     'optimized_query': optimized_query
+                },
+                'retrieval_info': {
+                    'subgraphs': [sg['id'] for sg in retrieval_results.subgraphs],
+                    'communities': [c.id for c in retrieval_results.communities],
+                    'confidence': retrieval_results.confidence
                 }
             }
-            
+    
+            return response
+    
         except Exception as e:
-            # Record query failure
+            # Record failure metrics
             duration = time.time() - start_time
+            metrics['total_time'] = duration
+            
             self.monitoring.performance_monitor.record_request(
                 duration=duration,
                 success=False,
                 endpoint='query_graph',
-                error=str(e)
+                error=str(e),
+                metrics=metrics
             )
-            
+    
             # Track error
+            error_details = {
+                'query': query,
+                'duration': duration,
+                'metrics': metrics
+            }
+            
             error_tracker.track_error(GraphError(
                 str(e),
                 'query_execution_error',
-                {
-                    'query': query,
-                    'duration': duration,
-                    'metrics': query_metrics
-                }
+                error_details
             ))
-            
+    
             raise GraphError(
                 f"Query execution failed: {str(e)}",
                 'query_execution_error',
-                {
-                    'query': query,
-                    'duration': duration,
-                    'metrics': query_metrics
-                }
+                error_details
             ) from e
     
+    def _generate_cache_key(self, query: str, embedding: torch.Tensor) -> str:
+        """Generate unique cache key for query and embedding."""
+        query_hash = hashlib.md5(query.encode()).hexdigest()
+        embedding_hash = hashlib.md5(
+            embedding.cpu().numpy().tobytes()
+        ).hexdigest()
+        return f"query_{query_hash}_{embedding_hash}"
+        
     def get_monitoring_metrics(self) -> Dict[str, Any]:
         """
         Get comprehensive monitoring metrics.

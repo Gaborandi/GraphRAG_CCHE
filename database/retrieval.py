@@ -52,6 +52,25 @@ class GraphRetriever:
         self.q_estimator = QValueEstimator(input_dim=config.model_config.get('embedding_dim', 768))
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.q_estimator.to(self.device)
+        
+        self.vector_index = FaissIndex(config.vector_dim)
+        self.query_optimizer = QueryOptimizer()
+        self.result_merger = ResultMerger()
+
+    async def hybrid_search(self, query, embedding):
+        # Run searches in parallel
+        [graph_results, vector_results] = await asyncio.gather(
+            self.graph_search(query),
+            self.vector_search(embedding)
+        )
+        
+        # Merge and rank results
+        merged_results = self.result_merger.merge(
+            graph_results,
+            vector_results,
+            strategy='reciprocal_rank_fusion'
+        )
+        return merged_results
 
     def retrieve(self, query: str, embedding_model, 
                 max_subgraphs: int = 5, max_depth: int = 3) -> RetrievalResult:

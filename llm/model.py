@@ -35,12 +35,30 @@ class LlamaProcessor:
             torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
             device_map="auto"
         )
+
+        self.batch_processor = BatchProcessor(
+            batch_size=config.get('batch_size', 32),
+            max_retries=config.get('max_retries', 3)
+        )
+        self.fallback_model = config.get('fallback_model')
         
         # Load prompt templates
         self.prompts = self._load_prompt_templates()
         
         self.logger.info("Llama model initialization complete")
-
+        
+    async def process_batch(self, texts):
+                try:
+                    return await self.batch_processor.process(
+                        texts,
+                        self.model,
+                        self.tokenizer
+                    )
+                except Exception as e:
+                    if self.fallback_model:
+                        return await self._process_with_fallback(texts)
+                    raise LLMProcessingError("Batch processing failed") from e
+        
     def _load_prompt_templates(self) -> Dict[str, str]:
         """Load prompt templates from configuration."""
         return {
