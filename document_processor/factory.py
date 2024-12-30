@@ -2,6 +2,9 @@
 from pathlib import Path
 from typing import Union
 
+from config import Config
+from document_processor.base import DocumentProcessor, Document
+
 class DocumentProcessorFactory:
     """Factory for creating document processors based on file type."""
     

@@ -9,11 +9,21 @@ import time
 from dataclasses import dataclass
 import json
 
-from ..config import Config
-from ..document_processor.factory import DocumentProcessorFactory
-from ..document_processor.base import Document
-from ..llm.model import LlamaProcessor, ExtractionResult
-from ..database.graph import KnowledgeGraph
+#from ..config import Config
+#from config import Config
+#from ..document_processor.factory import DocumentProcessorFactory
+#from ..document_processor.base import Document
+
+from config import Config
+from document_processor.factory import DocumentProcessorFactory, Document
+
+
+#from ..llm.model import LlamaProcessor, ExtractionResult
+#from ..database.graph import KnowledgeGraph
+
+from llm.model import LlamaProcessor, ExtractionResult
+from database.graph import KnowledgeGraph
+
 
 @dataclass
 class ProcessingResult:
@@ -156,33 +166,41 @@ class KnowledgeGraphPipeline:
             self.processing_status[result.doc_id] = result
 
 class PipelineManager:
-    """Manages pipeline execution and provides high-level interface."""
+    """Orchestrates reading files from a directory and using the DocumentProcessorFactory."""
     
-    def __init__(self, config_path: Union[str, Path]):
-        self.config = Config(config_path)
+    def __init__(self, config: Config):
+        self.config = config
         self.logger = logging.getLogger(self.__class__.__name__)
-        self.pipeline = KnowledgeGraphPipeline(self.config)
-
-    def process_directory(self, directory_path: Union[str, Path], 
-                        file_pattern: str = "*.*") -> Dict[str, Any]:
-        """Process all matching files in a directory."""
-        directory_path = Path(directory_path)
-        file_paths = []
+    
+    def process_directory(self, directory_path: str, file_patterns: str = "*.pdf,*.docx,*.csv") -> dict:
+        """
+        Process all files in a directory that match the given patterns.
         
-        # Collect all matching files
-        for pattern in file_pattern.split(","):
-            file_paths.extend(directory_path.glob(pattern.strip()))
+        Returns a dictionary summarizing results.
+        """
+        results = {
+            'total_files': 0,
+            'processed_files': 0,
+            'errors': []
+        }
         
-        if not file_paths:
-            raise ValueError(f"No matching files found in {directory_path}")
+        # Split the patterns by comma
+        patterns = [p.strip() for p in file_patterns.split(",")]
         
-        # Process files
-        results = self.pipeline.process_documents(file_paths)
+        for pattern in patterns:
+            # For each pattern, glob the directory
+            for file_path in Path(directory_path).glob(pattern):
+                results['total_files'] += 1
+                try:
+                    doc = DocumentProcessorFactory.process_document(file_path, self.config)
+                    self.logger.info(f"Successfully processed {file_path}")
+                    results['processed_files'] += 1
+                except Exception as e:
+                    err_msg = f"Error processing {file_path}: {str(e)}"
+                    self.logger.error(err_msg)
+                    results['errors'].append(err_msg)
         
-        # Prepare summary
-        summary = self._prepare_processing_summary(results)
-        
-        return summary
+        return results
 
     def _prepare_processing_summary(self, results: Dict[str, ProcessingResult]) -> Dict[str, Any]:
         """Prepare summary of processing results."""

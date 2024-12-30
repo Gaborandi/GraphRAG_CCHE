@@ -9,7 +9,8 @@ from collections import defaultdict
 import community
 import json
 
-from ..config import Config
+#from ..config import Config
+from config import Config
 from .graph import Neo4jConnection
 
 @dataclass

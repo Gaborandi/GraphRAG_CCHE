@@ -1,8 +1,10 @@
 # document_processor/base.py
+import logging
 from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import Generator, List, Dict, Any
-import logging
+from typing import List, Dict, Any, Optional, Union
+
+from config import Config  # <-- We import Config from the top-level config.py
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +28,7 @@ class Document:
 
 class DocumentProcessor(ABC):
     """Abstract base class for document processors."""
+    
     def __init__(self, config: Config):
         self.config = config
         self.logger = logging.getLogger(self.__class__.__name__)

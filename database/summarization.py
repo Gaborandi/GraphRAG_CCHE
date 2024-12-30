@@ -1,5 +1,6 @@
 # database/summarization.py
 from typing import List, Dict, Any, Optional, Set
+from typing import Tuple 
 import logging
 from dataclasses import dataclass
 from datetime import datetime
@@ -8,7 +9,8 @@ from collections import defaultdict
 import torch
 import json
 
-from ..config import Config
+#from ..config import Config
+from config import Config
 from .community import Community
 from .graph import Neo4jConnection
 

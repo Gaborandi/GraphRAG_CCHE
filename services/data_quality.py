@@ -15,7 +15,8 @@ import hashlib
 from concurrent.futures import ThreadPoolExecutor
 import time
 
-from ..config import Config
+#from ..config import Config
+from config import Config     
 
 @dataclass
 class EmbeddingJob:

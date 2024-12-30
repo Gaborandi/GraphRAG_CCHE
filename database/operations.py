@@ -10,7 +10,8 @@ from queue import Queue
 import json
 import traceback
 
-from ..config import Config
+#from ..config import Config
+from config import Config
 from .graph import Neo4jConnection
 
 class OperationType(Enum):

@@ -13,8 +13,9 @@ from queue import PriorityQueue
 import asyncio
 import time
 
-from ..config import Config
-from ..database.graph import Neo4jConnection
+#from ..config import Config
+from config import Config     
+from database.graph import Neo4jConnection
 from .embedding_manager import EmbeddingManager
 
 @dataclass

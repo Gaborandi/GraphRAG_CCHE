@@ -8,7 +8,8 @@ from queue import PriorityQueue
 import numpy as np
 from datetime import datetime
 
-from ..config import Config
+#from ..config import Config
+from config import Config
 from .community import Community, CommunityDetector
 from .graph import Neo4jConnection
 from .q_learning import QValueTrainer

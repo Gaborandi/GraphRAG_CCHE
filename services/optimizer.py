@@ -7,9 +7,10 @@ from collections import defaultdict
 import time
 import numpy as np
 
-from ..config import Config
+#from ..config import Config
+from config import Config     
 from .cache import cache_manager, QueryCache
-from ..database.graph import Neo4jConnection
+from database.graph import Neo4jConnection
 
 class PerformanceOptimizer:
     """Handles performance optimization for graph operations."""

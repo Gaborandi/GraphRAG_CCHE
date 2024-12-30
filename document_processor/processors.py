@@ -10,7 +10,7 @@ from datetime import datetime
 import hashlib
 
 from .base import Document, DocumentProcessor
-from ..config import Config
+from config import Config
 from ..utils.text_processing import TextPreprocessor
 
 class PDFProcessor(DocumentProcessor):
@@ -32,7 +32,9 @@ class PDFProcessor(DocumentProcessor):
                 # Extract text from all pages
                 text = ""
                 for page in pdf_reader.pages:
-                    text += page.extract_text() + "\n"
+                    page_text = page.extract_text()
+                    if page_text:
+                        text += page_text + "\n"
                 
                 # Clean extracted text
                 cleaned_text = self.preprocessor.clean_text(text)
@@ -45,7 +47,7 @@ class PDFProcessor(DocumentProcessor):
                     content=cleaned_text,
                     metadata=metadata,
                     doc_id=self._generate_doc_id(file_path, cleaned_text),
-                    source_path=file_path
+                    source_path=str(file_path)
                 )
                 
                 # Create chunks
@@ -113,7 +115,7 @@ class DocxProcessor(DocumentProcessor):
                 content=cleaned_text,
                 metadata=metadata,
                 doc_id=self._generate_doc_id(file_path, cleaned_text),
-                source_path=file_path
+                source_path=str(file_path)
             )
             
             # Create chunks
@@ -176,7 +178,7 @@ class CSVProcessor(DocumentProcessor):
                 content=cleaned_text,
                 metadata=metadata,
                 doc_id=self._generate_doc_id(file_path, cleaned_text),
-                source_path=file_path
+                source_path=str(file_path)
             )
             
             # Create chunks

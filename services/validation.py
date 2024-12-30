@@ -8,8 +8,11 @@ from enum import Enum
 import re
 import traceback
 
-from ..config import Config
-from ..database.graph import Neo4jConnection
+#from ..config import Config
+from config import Config                
+
+# Instead of from .database.graph import Neo4jConnection
+from database.graph import Neo4jConnection
 
 class ValidationLevel(Enum):
     """Validation severity levels."""

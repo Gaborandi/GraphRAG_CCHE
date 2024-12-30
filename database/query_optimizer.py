@@ -8,7 +8,8 @@ import numpy as np
 import torch
 from collections import defaultdict
 
-from ..config import Config
+#from ..config import Config
+from config import Config
 from .graph import Neo4jConnection
 from .analytics import GraphAnalyzer
 from .community import CommunityDetector
@@ -644,4 +645,4 @@ class QueryOptimizer:
         self.query_history[plan_key].append({
             'stats': stats,
             'timestamp': datetime.now()
-        })'
+        })

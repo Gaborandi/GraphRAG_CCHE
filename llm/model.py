@@ -7,8 +7,12 @@ from dataclasses import dataclass
 from threading import Lock
 import json
 
-from ..config import Config
-from ..document_processor.base import Document
+#from ..config import Config
+#from ..document_processor.base import Document
+
+from config import Config              
+from document_processor.base import DocumentProcessor
+from document_processor.base import Document
 
 @dataclass
 class ExtractionResult:

@@ -1,6 +1,7 @@
 # database/graph.py
+# database/graph.py
 from neo4j import Transaction, GraphDatabase
-from neo4j.exceptions import Neo4jTransientError, Neo4jError, TransientError
+from neo4j.exceptions import Neo4jError, TransientError
 from typing import List, Dict, Any, Optional, Tuple
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -9,26 +10,33 @@ import logging
 from contextlib import contextmanager
 import json
 import uuid
-import time  # Missing but used in multiple methods
-import re    # Missing but used in _validate_doc_id
-from neo4j import Session  # Missing but used in method signatures
+import time
+import re
+from functools import wraps  # Add this import for the decorator
+from neo4j import Session
 import hashlib
+import torch
 
-from ..config import Config
-from ..llm.model import ExtractionResult
-from .community import CommunityDetector
-from .retrieval import GraphRetriever
+from database.connection import Neo4jConnection
+from config import Config
+from llm.model import LlamaProcessor, ExtractionResult 
+from .retrieval import GraphRetriever, RetrievalResult
 from .staged_retrieval import StagedRetriever
 from .summarization import GraphSummarizer
 from .analytics import GraphAnalyzer
 from .pathfinding import PathFinder
 from .query_optimizer import QueryOptimizer
 from .operations import OperationHandler, OperationType, OperationResult
-from ..services.validation import GraphValidator, ValidationError
-from ..utils.error_handler import handle_errors, error_tracker, GraphError
-from ..services.cache import cache_manager, cache_result
-from ..services.optimizer import PerformanceOptimizer, QueryOptimizationContext
-from ..services.monitoring import MonitoringService
+
+from services.validation import GraphValidator, ValidationError
+from utils.error_handler import handle_errors, error_tracker, GraphError
+from services.cache import cache_manager, cache_result
+from services.optimizer import PerformanceOptimizer, QueryOptimizationContext
+from services.monitoring import MonitoringService
+
+from document_processor.factory import DocumentProcessorFactory  # Ensure this import is present
+
+
 
 # Add missing class definitions
 class GraphProcessingError(GraphError):
@@ -59,48 +67,6 @@ class QueryCache:
     def cache_query_result(self, query: str, results: Any):
         self._cache[query] = results
             
-class Neo4jConnection:
-    """Manages Neo4j database connection and operations."""
-    
-    def __init__(self, config: Config):
-        self.config = config
-        self.logger = logging.getLogger(self.__class__.__name__)
-        
-        # Initialize connection
-        self._driver = GraphDatabase.driver(
-            config.neo4j_config['uri'],
-            auth=(config.neo4j_config['user'], config.neo4j_config['password'])
-        )
-        
-        # Initialize database
-        self._init_database()
-
-    def _init_database(self):
-        """Initialize database schema and constraints."""
-        with self._driver.session() as session:
-            # Create constraints for uniqueness
-            constraints = [
-                "CREATE CONSTRAINT IF NOT EXISTS FOR (e:Entity) REQUIRE e.id IS UNIQUE",
-                "CREATE CONSTRAINT IF NOT EXISTS FOR (d:Document) REQUIRE d.id IS UNIQUE",
-                "CREATE INDEX IF NOT EXISTS FOR (e:Entity) ON (e.type)",
-                "CREATE INDEX IF NOT EXISTS FOR (e:Entity) ON (e.text)"
-            ]
-            
-            for constraint in constraints:
-                try:
-                    session.run(constraint)
-                except Exception as e:
-                    self.logger.error(f"Error creating constraint: {str(e)}")
-
-    def close(self):
-        """Close the database connection."""
-        self._driver.close()
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        self.close()
 
 @dataclass
 class RetryPolicy:
@@ -115,7 +81,6 @@ class RetryPolicy:
     
     def _is_retryable(self, exception: Exception) -> bool:
         return isinstance(exception, (
-            Neo4jTransientError,
             TransientError,
             ConnectionError,
             TimeoutError

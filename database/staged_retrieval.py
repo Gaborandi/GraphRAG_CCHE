@@ -8,7 +8,8 @@ from torch import Tensor
 import numpy as np
 from enum import Enum
 
-from ..config import Config
+#from ..config import Config
+from config import Config
 from .community import Community, CommunityDetector
 from .retrieval import GraphRetriever, RetrievalResult
 from .graph import Neo4jConnection

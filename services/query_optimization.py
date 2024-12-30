@@ -12,8 +12,9 @@ import numpy as np
 from enum import Enum
 import asyncio
 
-from ..config import Config
-from ..database.graph import Neo4jConnection
+#from ..config import Config
+from config import Config     
+from database.graph import Neo4jConnection
 from .cache import QueryCache
 
 class QueryType(Enum):

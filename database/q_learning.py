@@ -12,7 +12,8 @@ import random
 from collections import deque
 import json
 
-from ..config import Config
+#from ..config import Config
+from config import Config
 from .graph import Neo4jConnection
 
 @dataclass

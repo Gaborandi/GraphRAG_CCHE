@@ -12,8 +12,9 @@ import numpy as np
 from dataclasses import dataclass
 import traceback
 
-from ..config import Config
-from ..database.graph import Neo4jConnection
+#from ..config import Config
+from config import Config     
+from database.graph import Neo4jConnection
 
 @dataclass
 class MetricPoint:

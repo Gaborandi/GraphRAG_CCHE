@@ -5,7 +5,8 @@ import tempfile
 import yaml
 from typing import Dict, Any
 
-from ..config import Config
+#from ..config import Config
+from config import Config     
 from ..database.graph import Neo4jConnection
 from ..llm.model import LlamaProcessor
 from ..orchestration.pipeline import KnowledgeGraphPipeline

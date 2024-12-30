@@ -9,7 +9,8 @@ from collections import defaultdict
 import torch
 import numpy as np
 
-from ..config import Config
+#from ..config import Config
+from config import Config
 from .graph import Neo4jConnection
 from .analytics import GraphAnalyzer
 

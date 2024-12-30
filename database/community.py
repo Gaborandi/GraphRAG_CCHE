@@ -6,8 +6,10 @@ import logging
 from datetime import datetime
 import numpy as np
 from sklearn.cluster import SpectralClustering
-from ..config import Config
-from .graph import Neo4jConnection
+#from ..config import Config
+from config import Config
+#from .graph import Neo4jConnection
+from database.connection import Neo4jConnection
 
 @dataclass
 class Community:
@@ -20,12 +22,10 @@ class Community:
     summary: Optional[str] = None
 
 class CommunityDetector:
-    """Handles community detection and management in the knowledge graph."""
-    
-    def __init__(self, config: Config, neo4j_connection: Neo4jConnection):
+    def __init__(self, config: Config, neo4j_connection: Optional[Neo4jConnection] = None):
         self.config = config
-        self.neo4j = neo4j_connection
         self.logger = logging.getLogger(self.__class__.__name__)
+        self.connection = neo4j_connection or Neo4jConnection(config)
         
     def detect_communities(self, min_community_size: int = 3) -> List[Community]:
         """Detect communities in the graph using spectral clustering."""
